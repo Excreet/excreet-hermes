@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<meta name="theme-color" content="#1a0a2e"/>
+<title>Excreet — A Pre-Clinical Warning System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600;700&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+
+body{
+  background:#1a0a2e;
+  font-family:'DM Sans',system-ui,sans-serif;
+  overflow:hidden;
+  height:100dvh;
+  width:100vw;
+}
+
+/* ── Scroll container ── */
+#deck{
+  height:100dvh;
+  overflow-y:scroll;
+  scroll-snap-type:y mandatory;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+}
+#deck::-webkit-scrollbar{display:none}
+
+/* ── Each slide ── */
+.slide{
+  height:100dvh;
+  width:100vw;
+  scroll-snap-align:start;
+  position:relative;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+
+/* ── Shared background image ── */
+.bg{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  object-fit:cover;
+  object-position:center center;
+  z-index:0;
+}
+
+/* ── Overlays ── */
+.ov-dark{position:absolute;inset:0;z-index:1}
+.slide-content{position:relative;z-index:2;flex:1;display:flex;flex-direction:column}
+
+/* ── Progress bar ── */
+#progress{
+  position:fixed;top:0;left:0;
+  height:3px;
+  background:linear-gradient(90deg,#7B2FA0,#F5C518);
+  z-index:100;
+  transition:width .3s ease;
+  width:16.66%;
+}
+
+/* ── Nav dots ── */
+#dots{
+  position:fixed;right:16px;top:50%;transform:translateY(-50%);
+  display:flex;flex-direction:column;gap:10px;
+  z-index:100;
+}
+.dot{
+  width:7px;height:7px;
+  border-radius:50%;
+  background:rgba(255,255,255,0.28);
+  cursor:pointer;
+  transition:background .25s,transform .25s;
+}
+.dot.active{background:#F5C518;transform:scale(1.4)}
+
+/* ── Shared typography ── */
+.eyebrow{
+  font-family:'Cormorant Garamond',Georgia,serif;
+  font-size:11px;
+  font-weight:700;
+  color:#F5C518;
+  letter-spacing:.18em;
+  text-transform:uppercase;
+  line-height:1;
+}
+.headline{
+  font-family:'Cormorant Garamond',Georgia,serif;
+  font-weight:700;
+  color:#fff;
+  line-height:1.1;
+}
+.gold{color:#F5C518}
+.rule{width:40px;height:3px;background:#7B2FA0;flex-shrink:0}
+.body-text{
+  font-family:'DM Sans',system-ui,sans-serif;
+  font-weight:300;
+  color:#E8D8F5;
+  line-height:1.6;
+}
+.card{
+  background:rgba(123,47,160,0.28);
+  border:1px solid rgba(123,47,160,0.65);
+  border-radius:10px;
+  padding:18px 16px;
+  position:relative;
+  overflow:hidden;
+}
+.card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:#7B2FA0;
+}
+
+/* ── Swipe hint ── */
+#swipe-hint{
+  position:absolute;bottom:28px;left:50%;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  opacity:.7;animation:bounce 1.8s infinite;z-index:10;
+}
+#swipe-hint span{
+  font-family:'DM Sans',system-ui,sans-serif;
+  font-size:10px;letter-spacing:.14em;color:rgba(255,255,255,.6);text-transform:uppercase;
+}
+@keyframes bounce{
+  0%,100%{transform:translateX(-50%) translateY(0)}
+  50%{transform:translateX(-50%) translateY(-7px)}
+}
+
+/* ══════════════════════════════════════════
+   SLIDE 1 — Cover
+══════════════════════════════════════════ */
+#s1 .slide-content{
+  justify-content:center;
+  padding:48px 32px 40px;
+}
+#s1 .headline{font-size:clamp(58px,18vw,86px);letter-spacing:-.02em;line-height:.92;margin:14px 0 22px}
+#s1 .taglines p{font-size:16px;color:#F5C518;line-height:1.55}
+#s1 .site-tag{
+  position:absolute;bottom:20px;right:22px;
+  font-size:10px;letter-spacing:.2em;color:rgba(255,255,255,.5);text-transform:uppercase;
+}
+
+/* ══════════════════════════════════════════
+   SLIDE 2 — The Gap
+══════════════════════════════════════════ */
+#s2 .slide-content{padding:48px 28px 32px;gap:20px}
+#s2 .headline{font-size:clamp(30px,9vw,42px);margin:12px 0 16px}
+#s2 .stat-block{display:flex;flex-direction:column;gap:4px}
+#s2 .stat-title{font-family:'Cormorant Garamond',Georgia,serif;font-size:20px;font-weight:600;color:#F5C518;line-height:1.1}
+#s2 .stat-body{font-size:14px;color:#E8D8F5;font-weight:300;line-height:1.5}
+#s2 .divider{height:1px;background:rgba(245,197,24,.2)}
+
+/* ══════════════════════════════════════════
+   SLIDE 3 — What Excreet Does
+══════════════════════════════════════════ */
+#s3 .slide-content{padding:44px 24px 28px;gap:14px}
+#s3 .headline{font-size:clamp(24px,7.5vw,36px);margin:10px 0 16px}
+#s3 .cards{display:flex;flex-direction:column;gap:12px;flex:1}
+#s3 .card-title{font-family:'Cormorant Garamond',Georgia,serif;font-size:19px;font-weight:700;color:#F5C518;margin-bottom:6px}
+#s3 .card-body{font-size:13px;color:#E8D8F5;font-weight:300;line-height:1.55}
+
+/* ══════════════════════════════════════════
+   SLIDE 4 — How It Works
+══════════════════════════════════════════ */
+#s4 .slide-content{padding:48px 28px 36px;gap:18px}
+#s4 .headline{font-size:clamp(32px,10vw,48px);margin:12px 0 8px}
+#s4 .sub{font-size:14px;color:#E8D8F5;font-weight:300;line-height:1.5;margin-bottom:10px}
+#s4 .steps{display:flex;flex-direction:column;gap:18px;flex:1;justify-content:center}
+#s4 .step{display:flex;gap:16px;align-items:flex-start}
+#s4 .step-num{
+  width:42px;height:42px;flex-shrink:0;
+  background:#7B2FA0;
+  border-radius:6px;
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Cormorant Garamond',Georgia,serif;
+  font-size:24px;font-weight:700;color:#F5C518;
+}
+#s4 .step-title{font-family:'Cormorant Garamond',Georgia,serif;font-size:20px;font-weight:700;color:#fff;margin-bottom:4px;line-height:1.1}
+#s4 .step-body{font-size:13px;color:#E8D8F5;font-weight:300;line-height:1.5}
+
+/* ══════════════════════════════════════════
+   SLIDE 5 — Built-In Earnings
+══════════════════════════════════════════ */
+#s5 .slide-content{padding:44px 24px 28px;gap:14px}
+#s5 .headline{font-size:clamp(24px,7.5vw,36px);margin:10px 0 16px}
+#s5 .tiers{display:flex;gap:12px}
+#s5 .tier{
+  flex:1;
+  background:rgba(26,10,46,.6);
+  border:1px solid rgba(245,197,24,.25);
+  border-radius:10px;
+  padding:16px 14px;
+  text-align:center;
+}
+#s5 .tier-label{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#E8D8F5;margin-bottom:6px}
+#s5 .tier-amt{font-family:'Cormorant Garamond',Georgia,serif;font-size:52px;font-weight:300;color:#F5C518;line-height:1}
+#s5 .tier-sub{font-size:12px;color:rgba(232,216,245,.6);margin-top:4px;line-height:1.4}
+#s5 .callout{
+  background:rgba(123,47,160,.32);
+  border:1px solid rgba(245,197,24,.35);
+  border-radius:10px;
+  padding:18px 18px 14px;
+  position:relative;overflow:hidden;
+}
+#s5 .callout::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:#F5C518}
+#s5 .callout-text{font-family:'Cormorant Garamond',Georgia,serif;font-size:17px;font-weight:400;font-style:italic;color:#fff;line-height:1.45;margin-bottom:10px}
+#s5 .callout-fine{font-size:12px;color:rgba(232,216,245,.6)}
+
+/* ══════════════════════════════════════════
+   SLIDE 6 — Join
+══════════════════════════════════════════ */
+#s6 .slide-content{
+  justify-content:center;align-items:center;
+  padding:40px 28px;text-align:center;gap:0;
+}
+#s6 .headline{font-size:clamp(26px,8vw,40px);margin:14px 0 6px}
+#s6 .headline-gold{font-family:'DM Sans',system-ui,sans-serif;font-size:clamp(20px,6vw,32px);font-weight:700;color:#F5C518;line-height:1.2;margin-bottom:24px}
+#s6 .pricing{display:flex;gap:32px;margin-bottom:24px;justify-content:center;align-items:center}
+#s6 .price-col{text-align:center}
+#s6 .price-label{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#E8D8F5;margin-bottom:4px}
+#s6 .price-val{font-family:'Cormorant Garamond',Georgia,serif;font-size:38px;font-weight:700;color:#F5C518}
+#s6 .divider-v{width:1px;height:50px;background:rgba(245,197,24,.3)}
+#s6 .fine{font-size:13px;color:rgba(232,216,245,.65);margin-bottom:28px;line-height:1.5}
+#s6 .cta{
+  display:inline-block;
+  background:#F5C518;color:#1a0a2e;
+  font-family:'DM Sans',system-ui,sans-serif;
+  font-size:15px;font-weight:700;
+  padding:14px 36px;border-radius:8px;
+  text-decoration:none;letter-spacing:.04em;
+  transition:background .15s;
+}
+#s6 .cta:active{background:#ffe04a}
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+<div id="dots">
+  <div class="dot active" onclick="goTo(0)"></div>
+  <div class="dot" onclick="goTo(1)"></div>
+  <div class="dot" onclick="goTo(2)"></div>
+  <div class="dot" onclick="goTo(3)"></div>
+  <div class="dot" onclick="goTo(4)"></div>
+  <div class="dot" onclick="goTo(5)"></div>
+</div>
+
+<div id="deck">
+
+  <!-- ══ SLIDE 1 — Cover ══ -->
+  <section class="slide" id="s1">
+    <img class="bg" src="/deck-bg.png" alt="" loading="eager"/>
+    <div class="ov-dark" style="background:linear-gradient(to right,rgba(26,10,46,.72) 40%,rgba(26,10,46,.22) 100%)"></div>
+    <div class="ov-dark" style="background:linear-gradient(to top,rgba(26,10,46,.4) 0%,transparent 50%)"></div>
+    <div class="slide-content" id="s1">
+      <p class="eyebrow">A Pre-Clinical Warning System</p>
+      <h1 class="headline">Excreet</h1>
+      <div class="rule" style="margin-bottom:22px"></div>
+      <div class="taglines">
+        <p>Your body warns every day.</p>
+        <p>Excreet translates that warning —</p>
+        <p>with just your phone.</p>
+      </div>
+    </div>
+    <span class="site-tag">excreet.com</span>
+    <div id="swipe-hint">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2"><polyline points="18 15 12 21 6 15"/><polyline points="18 9 12 15 6 9"/></svg>
+      <span>Swipe up</span>
+    </div>
+  </section>
+
+  <!-- ══ SLIDE 2 — The Gap ══ -->
+  <section class="slide" id="s2">
+    <img class="bg" src="/deck-bg.png" alt="" loading="lazy"/>
+    <div class="ov-dark" style="background:rgba(26,10,46,.62)"></div>
+    <div class="slide-content">
+      <p class="eyebrow">The Gap</p>
+      <h2 class="headline">The window where change is easiest goes ignored.</h2>
+      <div class="rule" style="margin-bottom:20px"></div>
+      <div class="stat-block">
+        <p class="stat-title">Healthcare is reactive.</p>
+        <p class="stat-body">Most people see a doctor when something is already wrong.</p>
+      </div>
+      <div class="divider"></div>
+      <div class="stat-block">
+        <p class="stat-title">Lab work costs hundreds.</p>
+        <p class="stat-body">Most people skip it until they can't afford to wait.</p>
+      </div>
+      <div class="divider"></div>
+      <div class="stat-block">
+        <p class="stat-title">Daily signals vanish unread.</p>
+        <p class="stat-body">Your body communicates every morning. No one is listening.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SLIDE 3 — What Excreet Does ══ -->
+  <section class="slide" id="s3">
+    <img class="bg" src="/deck-bg.png" alt="" loading="lazy"/>
+    <div class="ov-dark" style="background:linear-gradient(to bottom,rgba(26,10,46,.55) 0%,rgba(26,10,46,.4) 50%,rgba(26,10,46,.88) 100%)"></div>
+    <div class="slide-content">
+      <p class="eyebrow">What Excreet Does</p>
+      <h2 class="headline">Your bathroom routine, turned into data your body — and your doctor — can use.</h2>
+      <div class="rule" style="margin-bottom:14px"></div>
+      <div class="cards">
+        <div class="card">
+          <p class="card-title">Body Check</p>
+          <p class="card-body">Daily phone photo — your morning urine, bowel output and pH strip scored and tracked over time.</p>
+        </div>
+        <div class="card">
+          <p class="card-title">Ministry of Healing</p>
+          <p class="card-body">Private naturopathic guidance — a personal healer available every day, not just at appointments.</p>
+        </div>
+        <div class="card">
+          <p class="card-title">Provider Report</p>
+          <p class="card-body">A printable clinical pattern report — hand it to your doctor and be prepared, not reactive.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SLIDE 4 — How It Works ══ -->
+  <section class="slide" id="s4">
+    <img class="bg" src="/deck-bg.png" alt="" loading="lazy" style="object-position:right center"/>
+    <div class="ov-dark" style="background:rgba(26,10,46,.70)"></div>
+    <div class="slide-content">
+      <p class="eyebrow">How It Works</p>
+      <h2 class="headline">Under five minutes a day.</h2>
+      <p class="sub">A quiet ritual that compounds — the way good health always has.</p>
+      <div class="rule" style="margin-bottom:4px"></div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div>
+            <p class="step-title">Check in</p>
+            <p class="step-body">Answer a short questionnaire — provide phone photos of urine, bowels and pH tests. Private, routine, insightful.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div>
+            <p class="step-title">Get scored</p>
+            <p class="step-body">Excreet rates your photos and questionnaire, pulls the signals and highlights emerging patterns.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div>
+            <p class="step-title">Take action</p>
+            <p class="step-body">Excreet recommends adjustments and tracks your progress over time.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SLIDE 5 — Built-In Earnings ══ -->
+  <section class="slide" id="s5">
+    <img class="bg" src="/deck-bg.png" alt="" loading="lazy"/>
+    <div class="ov-dark" style="background:rgba(26,10,46,.62)"></div>
+    <div class="slide-content">
+      <p class="eyebrow">Built-In Earnings</p>
+      <h2 class="headline">Every member is automatically an affiliate. No application required.</h2>
+      <div class="rule" style="margin-bottom:14px"></div>
+      <div class="tiers">
+        <div class="tier">
+          <p class="tier-label">Starter · $15/mo</p>
+          <p class="tier-amt">$5</p>
+          <p class="tier-sub">per referred member,<br/>per month</p>
+        </div>
+        <div class="tier">
+          <p class="tier-label">Premium · $25/mo</p>
+          <p class="tier-amt">$10</p>
+          <p class="tier-sub">per referred member,<br/>per month</p>
+        </div>
+      </div>
+      <div class="callout">
+        <p class="callout-text">Refer 5 Premium members — your membership pays for itself and puts $25 in your pocket, every month.</p>
+        <p class="callout-fine">Payouts every 2 weeks after $50 threshold. No inventory. No training.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SLIDE 6 — Join ══ -->
+  <section class="slide" id="s6">
+    <img class="bg" src="/deck-bg.png" alt="" loading="lazy"/>
+    <div class="ov-dark" style="background:radial-gradient(ellipse at center,rgba(26,10,46,.18) 0%,rgba(26,10,46,.82) 70%)"></div>
+    <div class="slide-content">
+      <p class="eyebrow">Join The Excreet Community</p>
+      <h2 class="headline">Your body warns every day.</h2>
+      <p class="headline-gold">Your bathroom becomes your laboratory.</p>
+      <div class="rule" style="margin:0 auto 24px;width:40px"></div>
+      <div class="pricing">
+        <div class="price-col">
+          <p class="price-label">Starter</p>
+          <p class="price-val">$15/mo</p>
+        </div>
+        <div class="divider-v"></div>
+        <div class="price-col">
+          <p class="price-label">Premium</p>
+          <p class="price-val">$25/mo</p>
+        </div>
+      </div>
+      <p class="fine">Affiliate program active from day one —<br/>no application required.</p>
+      <a class="cta" href="https://excreet.com/membership-account/checkout/?level=1">Join Excreet</a>
+    </div>
+  </section>
+
+</div>
+
+<script>
+var deck=document.getElementById('deck');
+var slides=document.querySelectorAll('.slide');
+var dots=document.querySelectorAll('.dot');
+var progress=document.getElementById('progress');
+var hint=document.getElementById('swipe-hint');
+var current=0;
+var total=slides.length;
+
+function update(){
+  var idx=Math.round(deck.scrollTop/window.innerHeight);
+  if(idx===current)return;
+  current=idx;
+  dots.forEach(function(d,i){d.classList.toggle('active',i===current)});
+  progress.style.width=((current+1)/total*100)+'%';
+  if(current>0&&hint)hint.style.display='none';
+}
+
+deck.addEventListener('scroll',update,{passive:true});
+
+function goTo(i){
+  deck.scrollTo({top:i*window.innerHeight,behavior:'smooth'});
+}
+
+// Keyboard nav
+document.addEventListener('keydown',function(e){
+  if(e.key==='ArrowDown'||e.key==='ArrowRight')goTo(Math.min(current+1,total-1));
+  if(e.key==='ArrowUp'||e.key==='ArrowLeft')goTo(Math.max(current-1,0));
+});
+
+// Tap left/right half to go prev/next
+deck.addEventListener('click',function(e){
+  if(e.target.closest('a,.dot'))return;
+  if(e.clientX>window.innerWidth/2)goTo(Math.min(current+1,total-1));
+  else goTo(Math.max(current-1,0));
+});
+
+// Init progress
+progress.style.width=(1/total*100)+'%';
+</script>
+</body>
+</html>
