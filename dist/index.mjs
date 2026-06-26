@@ -309685,7 +309685,6 @@ var import_express22 = __toESM(require_express2(), 1);
 import fs5 from "fs";
 
 // src/lib/videoRecorder.ts
-import { chromium } from "playwright";
 import { execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";
 import fs4 from "fs";
@@ -309713,6 +309712,7 @@ async function renderVideo(videoUrl) {
   const webmDir = path6.join(OUTPUT_DIR, "frames");
   if (!fs4.existsSync(webmDir)) fs4.mkdirSync(webmDir, { recursive: true });
   try {
+    const { chromium } = await import("playwright");
     const browser = await chromium.launch({
       headless: true,
       args: [
