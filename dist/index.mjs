@@ -261342,10 +261342,10 @@ function pgEnumObjectWithSchema(enumName, values, schema) {
 // ../../node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.18.0_pg@8.20.0/node_modules/drizzle-orm/subquery.js
 var Subquery = class {
   static [entityKind] = "Subquery";
-  constructor(sql2, fields, alias, isWith = false, usedTables = []) {
+  constructor(sql3, fields, alias, isWith = false, usedTables = []) {
     this._ = {
       brand: "Subquery",
-      sql: sql2,
+      sql: sql3,
       selectedFields: fields,
       alias,
       isWith,
@@ -261746,19 +261746,19 @@ function sql(strings, ...params) {
   }
   return new SQL(queryChunks);
 }
-((sql2) => {
+((sql22) => {
   function empty() {
     return new SQL([]);
   }
-  sql2.empty = empty;
+  sql22.empty = empty;
   function fromList(list) {
     return new SQL(list);
   }
-  sql2.fromList = fromList;
+  sql22.fromList = fromList;
   function raw(str2) {
     return new SQL([new StringChunk(str2)]);
   }
-  sql2.raw = raw;
+  sql22.raw = raw;
   function join2(chunks, separator) {
     const result = [];
     for (const [i, chunk] of chunks.entries()) {
@@ -261769,24 +261769,24 @@ function sql(strings, ...params) {
     }
     return new SQL(result);
   }
-  sql2.join = join2;
+  sql22.join = join2;
   function identifier(value) {
     return new Name(value);
   }
-  sql2.identifier = identifier;
+  sql22.identifier = identifier;
   function placeholder2(name2) {
     return new Placeholder(name2);
   }
-  sql2.placeholder = placeholder2;
+  sql22.placeholder = placeholder2;
   function param2(value, encoder) {
     return new Param(value, encoder);
   }
-  sql2.param = param2;
+  sql22.param = param2;
 })(sql || (sql = {}));
 ((SQL2) => {
   class Aliased {
-    constructor(sql2, fieldAlias) {
-      this.sql = sql2;
+    constructor(sql22, fieldAlias) {
+      this.sql = sql22;
       this.fieldAlias = fieldAlias;
     }
     static [entityKind] = "SQL.Aliased";
@@ -264673,8 +264673,8 @@ var PgDialect = class {
       return "none";
     }
   }
-  sqlToQuery(sql2, invokeSource) {
-    return sql2.toQuery({
+  sqlToQuery(sql22, invokeSource) {
+    return sql22.toQuery({
       casing: this.casing,
       escapeName: this.escapeName,
       escapeParam: this.escapeParam,
@@ -267033,10 +267033,10 @@ var PgRelationalQuery = class extends QueryPromise {
 
 // ../../node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.18.0_pg@8.20.0/node_modules/drizzle-orm/pg-core/query-builders/raw.js
 var PgRaw = class extends QueryPromise {
-  constructor(execute, sql2, query, mapBatchResult) {
+  constructor(execute, sql3, query, mapBatchResult) {
     super();
     this.execute = execute;
-    this.sql = sql2;
+    this.sql = sql3;
     this.query = query;
     this.mapBatchResult = mapBatchResult;
   }
@@ -267356,8 +267356,8 @@ var NoopCache = class extends Cache {
   async onMutate(_params) {
   }
 };
-async function hashQuery(sql2, params) {
-  const dataToHash = `${sql2}-${JSON.stringify(params)}`;
+async function hashQuery(sql3, params) {
+  const dataToHash = `${sql3}-${JSON.stringify(params)}`;
   const encoder = new TextEncoder();
   const data = encoder.encode(dataToHash);
   const hashBuffer = await crypto.subtle.digest("SHA-256", data);
@@ -267490,8 +267490,8 @@ var PgSession = class {
     ).all();
   }
   /** @internal */
-  async count(sql2, token) {
-    const res = await this.execute(sql2, token);
+  async count(sql22, token) {
+    const res = await this.execute(sql22, token);
     return Number(
       res[0]["count"]
     );
@@ -267713,8 +267713,8 @@ var NodePgSession = class _NodePgSession extends PgSession {
       if (isPool) session.client.release();
     }
   }
-  async count(sql2) {
-    const res = await this.execute(sql2);
+  async count(sql22) {
+    const res = await this.execute(sql22);
     return Number(
       res["rows"][0]["count"]
     );
@@ -308383,6 +308383,202 @@ Time: ${(/* @__PURE__ */ new Date()).toUTCString()}`
   } catch (err) {
     req.log.error({ err }, "admin/test-email: failed");
     res.status(500).json({ ok: false, error: "send_failed", detail: String(err) });
+  }
+});
+router9.post("/admin/migrate", async (req, res) => {
+  req.log.info("admin/migrate: running schema push");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const enums = [
+      ["affiliate_w9_status", ["not_required", "pending", "completed"]],
+      ["affiliate_payout_status", ["pending", "processing", "paid", "failed"]],
+      ["affiliate_referral_status", ["pending", "cleared", "revoked"]],
+      ["hermes_job_status", ["pending", "processing", "completed", "failed"]],
+      ["think_tank_outcome_type", ["improvement", "no_change", "regression", "testimonial"]],
+      ["think_tank_category", ["research", "article", "protocol", "testimonial_pattern"]]
+    ];
+    for (const [name, values] of enums) {
+      await client.query(`
+        DO $$ BEGIN
+          CREATE TYPE ${name} AS ENUM (${values.map((v) => `'${v}'`).join(", ")});
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `);
+    }
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        id         SERIAL PRIMARY KEY,
+        title      TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS messages (
+        id              SERIAL PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role            TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS hermes_jobs (
+        job_id        TEXT PRIMARY KEY,
+        status        hermes_job_status NOT NULL DEFAULT 'pending',
+        member_id     TEXT NOT NULL,
+        workflow_type TEXT NOT NULL,
+        payload       JSONB NOT NULL,
+        result        JSONB,
+        error         TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS body_snapshots (
+        id            TEXT PRIMARY KEY,
+        member_id     TEXT NOT NULL,
+        snapshot_date DATE NOT NULL,
+        body_score    INTEGER NOT NULL,
+        tier          TEXT NOT NULL,
+        result        JSONB NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS body_snapshots_member_date_uidx
+        ON body_snapshots(member_id, snapshot_date);
+
+      CREATE TABLE IF NOT EXISTS member_protocols (
+        id           TEXT PRIMARY KEY,
+        member_id    TEXT NOT NULL,
+        concern      TEXT NOT NULL,
+        protocol     JSONB NOT NULL,
+        generated_at TIMESTAMPTZ NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS member_protocols_member_id_idx
+        ON member_protocols(member_id);
+
+      CREATE TABLE IF NOT EXISTS ministry_sessions (
+        id           SERIAL PRIMARY KEY,
+        member_id    TEXT NOT NULL,
+        product_tier TEXT NOT NULL DEFAULT 'starter',
+        count        INTEGER NOT NULL DEFAULT 0,
+        period_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS ministry_chat_history (
+        id         SERIAL PRIMARY KEY,
+        member_id  TEXT NOT NULL UNIQUE,
+        messages   JSONB NOT NULL DEFAULT '[]',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS affiliate_accounts (
+        id                      SERIAL PRIMARY KEY,
+        member_id               TEXT NOT NULL UNIQUE,
+        referral_code           TEXT UNIQUE,
+        w9_status               affiliate_w9_status NOT NULL DEFAULT 'not_required',
+        payout_balance_cents    INTEGER NOT NULL DEFAULT 0,
+        total_earned_cents      INTEGER NOT NULL DEFAULT 0,
+        stripe_connect_account_id TEXT,
+        w9_alert_sent_at        TIMESTAMPTZ,
+        created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS affiliate_referrals (
+        id                 SERIAL PRIMARY KEY,
+        referrer_member_id TEXT NOT NULL,
+        referred_member_id TEXT NOT NULL UNIQUE,
+        referred_level     INTEGER NOT NULL,
+        status             affiliate_referral_status NOT NULL DEFAULT 'pending',
+        joined_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        credit_cleared_at  TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS affiliate_payouts (
+        id                  SERIAL PRIMARY KEY,
+        affiliate_member_id TEXT NOT NULL,
+        amount_cents        INTEGER NOT NULL,
+        status              affiliate_payout_status NOT NULL DEFAULT 'pending',
+        period_start        TIMESTAMPTZ NOT NULL,
+        period_end          TIMESTAMPTZ NOT NULL,
+        stripe_payout_id    TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS site_health_checks (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        page         TEXT NOT NULL,
+        url          TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        http_status  INTEGER,
+        response_ms  INTEGER,
+        failed_checks JSONB,
+        checked_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS member_sms_prefs (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        member_id    TEXT NOT NULL UNIQUE,
+        phone_number TEXT NOT NULL,
+        opted_in     BOOLEAN NOT NULL DEFAULT true,
+        channel      TEXT NOT NULL DEFAULT 'sms',
+        timezone     TEXT NOT NULL DEFAULT 'America/New_York',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS think_tank (
+        id             TEXT PRIMARY KEY,
+        title          TEXT NOT NULL,
+        summary        TEXT NOT NULL,
+        content        TEXT NOT NULL,
+        category       think_tank_category NOT NULL,
+        tags           TEXT[] NOT NULL DEFAULT '{}',
+        source_url     TEXT,
+        author         TEXT,
+        published_date TEXT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS think_tank_category_idx ON think_tank(category);
+
+      CREATE TABLE IF NOT EXISTS think_tank_outcomes (
+        id               TEXT PRIMARY KEY,
+        member_id        TEXT NOT NULL,
+        protocol_ref     TEXT,
+        article_id       TEXT,
+        outcome_type     think_tank_outcome_type NOT NULL,
+        body_score_before INTEGER,
+        body_score_after  INTEGER,
+        timeframe_days   INTEGER,
+        concern          TEXT,
+        protocol_summary TEXT,
+        outcome_notes    TEXT,
+        testimonial_text TEXT,
+        recorded_by      TEXT NOT NULL DEFAULT 'system',
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS think_tank_outcomes_member_idx  ON think_tank_outcomes(member_id);
+      CREATE INDEX IF NOT EXISTS think_tank_outcomes_type_idx    ON think_tank_outcomes(outcome_type);
+      CREATE INDEX IF NOT EXISTS think_tank_outcomes_article_idx ON think_tank_outcomes(article_id);
+    `);
+    await client.query("COMMIT");
+    req.log.info("admin/migrate: schema push complete");
+    res.json({ ok: true, message: "Schema push complete \u2014 all tables created." });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    req.log.error({ err }, "admin/migrate: failed");
+    res.status(500).json({ error: "migrate_failed", detail: String(err) });
+  } finally {
+    client.release();
   }
 });
 var admin_default = router9;
