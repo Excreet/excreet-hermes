@@ -307925,8 +307925,32 @@ async function sendOwnerEmail(subject, body) {
 }
 
 // src/services/siteHealthService.ts
-var lastAlertSentAt = 0;
 var ALERT_COOLDOWN_MS = 30 * 60 * 1e3;
+var KV_KEY = "last_health_alert_sent_at";
+async function getLastAlertSentAt() {
+  try {
+    const res = await pool.query(
+      "SELECT value FROM server_kv WHERE key = $1",
+      [KV_KEY]
+    );
+    if (res.rows.length === 0) return 0;
+    return parseInt(res.rows[0].value, 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+async function setLastAlertSentAt(ts) {
+  try {
+    await pool.query(
+      `INSERT INTO server_kv (key, value, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+      [KV_KEY, String(ts)]
+    );
+  } catch (err) {
+    logger.error({ err }, "site-health: failed to persist alert timestamp");
+  }
+}
 var INTERNAL_PORT = process.env["PORT"] ?? "8080";
 var INTERNAL_BASE = `http://localhost:${INTERNAL_PORT}`;
 var ENDPOINT_CHECKS = [
@@ -308219,8 +308243,9 @@ async function runSiteHealthChecks() {
       logger.warn({ page: f.page, issues: f.failedChecks }, "site-health: page issue detected");
     }
     const now = Date.now();
+    const lastAlertSentAt = await getLastAlertSentAt();
     if (now - lastAlertSentAt > ALERT_COOLDOWN_MS) {
-      lastAlertSentAt = now;
+      await setLastAlertSentAt(now);
       const pageList = failing.map((f) => `\u2022 ${f.page}: ${f.failedChecks.join(", ")}`).join("\n");
       const subject = `\u{1F6A8} Excreet Alert \u2014 ${failing.length} issue(s) detected`;
       const msg = `EXCREET SITE MONITOR
@@ -308248,6 +308273,11 @@ excreet.com`;
       if (!emailConfigured() && !smsConfigured()) {
         logger.warn("site-health: issues detected but no alert channel configured (set OWNER_EMAIL + SMTP_USER + SMTP_PASS)");
       }
+    } else {
+      logger.info(
+        { cooldownRemainingMs: ALERT_COOLDOWN_MS - (now - lastAlertSentAt) },
+        "site-health: issues found but alert suppressed (cooldown active)"
+      );
     }
   }
   await db.insert(siteHealthChecksTable).values(
@@ -308289,7 +308319,7 @@ function startSiteHealthScheduler() {
     } catch (err) {
       logger.error({ err }, "site-health: scheduled check failed");
     }
-  }, 5 * 60 * 1e3);
+  }, 15 * 60 * 1e3);
   setInterval(async () => {
     try {
       await runSiteHealthChecks();
@@ -308297,7 +308327,7 @@ function startSiteHealthScheduler() {
       logger.error({ err }, "site-health: scheduled check failed");
     }
   }, INTERVAL_MS);
-  logger.info("site-health: scheduler started (interval=30m, first-run=5m)");
+  logger.info("site-health: scheduler started (interval=30m, first-run=15m)");
 }
 
 // src/routes/hermes/admin.ts
@@ -310316,6 +310346,12 @@ async function runStartupMigrations() {
 
       CREATE INDEX IF NOT EXISTS ministry_chat_archives_member_archived
         ON ministry_chat_archives(member_id, archived_at DESC);
+
+      CREATE TABLE IF NOT EXISTS server_kv (
+        key        TEXT PRIMARY KEY,
+        value      TEXT        NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
     logger.info("Startup migrations: OK");
   } catch (err) {
