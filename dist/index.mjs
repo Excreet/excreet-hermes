@@ -308324,45 +308324,25 @@ router9.get("/admin/members", async (req, res) => {
     res.json(_memberCache);
     return;
   }
-  const wpKey = process.env.EXCREET_WP_MEMBER_KEY;
-  const originIp = process.env.EXCREET_WP_ORIGIN_IP;
-  const wpUrl = originIp ? `http://${originIp}/wp-json/excreet/v1/members/count` : "https://excreet.com/wp-json/excreet/v1/members/count";
-  if (!wpKey) {
-    req.log.warn("EXCREET_WP_MEMBER_KEY not set \u2014 cannot fetch member counts");
-    res.status(503).json({ error: "not_configured", message: "WP member key not configured." });
+  if (_memberCache) {
+    res.json(_memberCache);
     return;
   }
-  try {
-    const r = await fetch(wpUrl, {
-      headers: {
-        Authorization: `Bearer ${wpKey}`,
-        ...originIp ? { Host: "excreet.com" } : {}
-      },
-      signal: AbortSignal.timeout(8e3)
-    });
-    if (!r.ok) {
-      const body = await r.text();
-      req.log.warn({ status: r.status, body }, "WP member count endpoint returned non-200");
-      if (_memberCache) {
-        res.json(_memberCache);
-        return;
-      }
-      res.status(502).json({ error: "wp_error", status: r.status });
-      return;
-    }
-    const data = await r.json();
-    _memberCache = { ...data, cached_at: (/* @__PURE__ */ new Date()).toISOString() };
-    _memberCacheMs = now;
-    req.log.info({ total: data.total }, "member counts refreshed from WP");
-    res.json(_memberCache);
-  } catch (err) {
-    req.log.error({ err }, "admin/members fetch error");
-    if (_memberCache) {
-      res.json(_memberCache);
-      return;
-    }
-    res.status(502).json({ error: "fetch_failed", detail: String(err) });
+  res.status(503).json({
+    error: "no_data",
+    message: "Member counts not yet synced. WP cron pushes every 6 hours \u2014 first sync fires within 6 hours of patch-365 deployment."
+  });
+});
+router9.post("/admin/member-sync", (req, res) => {
+  const body = req.body;
+  if (typeof body?.total !== "number" || typeof body?.new_last_30 !== "number" || !Array.isArray(body?.by_level)) {
+    res.status(400).json({ error: "invalid_payload" });
+    return;
   }
+  _memberCache = { ...body, cached_at: (/* @__PURE__ */ new Date()).toISOString() };
+  _memberCacheMs = Date.now();
+  req.log.info({ total: body.total }, "member counts synced from WP push");
+  res.json({ ok: true, cached_at: _memberCache.cached_at });
 });
 router9.post("/admin/test-email", async (req, res) => {
   if (!emailConfigured()) {
