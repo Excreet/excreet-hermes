@@ -307925,7 +307925,7 @@ async function sendOwnerEmail(subject, body) {
 }
 
 // src/services/siteHealthService.ts
-var ALERT_COOLDOWN_MS = 30 * 60 * 1e3;
+var ALERT_COOLDOWN_MS = 8 * 60 * 60 * 1e3;
 var KV_KEY = "last_health_alert_sent_at";
 async function getLastAlertSentAt() {
   try {
@@ -308312,7 +308312,7 @@ async function getLatestHealthResults() {
   }));
 }
 function startSiteHealthScheduler() {
-  const INTERVAL_MS = 30 * 60 * 1e3;
+  const INTERVAL_MS = 8 * 60 * 60 * 1e3;
   setTimeout(async () => {
     try {
       await runSiteHealthChecks();
@@ -308327,7 +308327,7 @@ function startSiteHealthScheduler() {
       logger.error({ err }, "site-health: scheduled check failed");
     }
   }, INTERVAL_MS);
-  logger.info("site-health: scheduler started (interval=30m, first-run=15m)");
+  logger.info("site-health: scheduler started (interval=8h, first-run=15m)");
 }
 
 // src/routes/hermes/admin.ts
