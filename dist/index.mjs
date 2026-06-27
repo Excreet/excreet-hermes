@@ -267830,6 +267830,7 @@ __export(schema_exports, {
   jobStatusEnum: () => jobStatusEnum,
   memberProtocolsTable: () => memberProtocolsTable,
   memberSmsPrefsTable: () => memberSmsPrefsTable,
+  ministryChatArchivesTable: () => ministryChatArchivesTable,
   ministryChatHistoryTable: () => ministryChatHistoryTable,
   ministrySessionsTable: () => ministrySessionsTable,
   outcomeTypeEnum: () => outcomeTypeEnum,
@@ -268169,6 +268170,16 @@ var ministryChatHistoryTable = pgTable("ministry_chat_history", {
   memberId: text("member_id").notNull().unique(),
   messages: jsonb("messages").$type().notNull().default([]),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
+// ../../lib/db/src/schema/ministryChatArchives.ts
+var ministryChatArchivesTable = pgTable("ministry_chat_archives", {
+  id: serial("id").primaryKey(),
+  memberId: text("member_id").notNull(),
+  messages: jsonb("messages").$type().notNull().default([]),
+  messageCount: integer2("message_count").notNull().default(0),
+  preview: text("preview").notNull().default(""),
+  archivedAt: timestamp("archived_at", { withTimezone: true }).notNull().defaultNow()
 });
 
 // ../../lib/db/src/schema/affiliateAccounts.ts
@@ -283937,8 +283948,34 @@ async function incrementSession(memberId, tier) {
 }
 
 // src/lib/ministryChatStore.ts
-async function resetChatHistory(memberId) {
+async function archiveAndResetChatHistory(memberId) {
+  const messages = await getChatHistory(memberId);
+  if (messages.length === 0) return null;
+  const firstUser = messages.find((m) => m.role === "user");
+  const preview = (firstUser?.content ?? "").slice(0, 160);
+  const [inserted] = await db.insert(ministryChatArchivesTable).values({ memberId, messages, messageCount: messages.length, preview }).returning({ id: ministryChatArchivesTable.id });
   await db.delete(ministryChatHistoryTable).where(eq(ministryChatHistoryTable.memberId, memberId));
+  return inserted?.id ?? null;
+}
+async function listArchivedSessions(memberId) {
+  const rows = await db.select({
+    id: ministryChatArchivesTable.id,
+    archivedAt: ministryChatArchivesTable.archivedAt,
+    messageCount: ministryChatArchivesTable.messageCount,
+    preview: ministryChatArchivesTable.preview
+  }).from(ministryChatArchivesTable).where(eq(ministryChatArchivesTable.memberId, memberId)).orderBy(desc(ministryChatArchivesTable.archivedAt));
+  return rows.map((r) => ({
+    id: r.id,
+    archivedAt: r.archivedAt.toISOString(),
+    messageCount: r.messageCount,
+    exchanges: Math.floor(r.messageCount / 2),
+    preview: r.preview
+  }));
+}
+async function getArchivedSession(sessionId, memberId) {
+  const [row] = await db.select().from(ministryChatArchivesTable).where(eq(ministryChatArchivesTable.id, sessionId)).limit(1);
+  if (!row || row.memberId !== memberId) return null;
+  return row;
 }
 var MAX_HISTORY = 40;
 async function getChatHistory(memberId) {
@@ -284317,9 +284354,42 @@ router5.post("/ministry/history/reset", async (req, res) => {
     res.status(400).json({ error: "missing_member_id" });
     return;
   }
-  await resetChatHistory(member_id.trim());
-  req.log.info({ member_id }, "Ministry chat history reset by member");
-  res.json({ success: true, member_id });
+  const archiveId = await archiveAndResetChatHistory(member_id.trim());
+  req.log.info({ member_id, archiveId }, "Ministry session archived and reset");
+  res.json({ success: true, member_id, archiveId });
+});
+router5.get("/ministry/sessions/:memberId", async (req, res) => {
+  const memberId = req.params["memberId"]?.trim();
+  if (!memberId) {
+    res.status(400).json({ error: "missing_member_id" });
+    return;
+  }
+  try {
+    const sessions = await listArchivedSessions(memberId);
+    res.json({ memberId, sessions });
+  } catch (err) {
+    req.log.error({ memberId, err }, "Ministry sessions: list error");
+    res.status(500).json({ error: "Failed to load sessions" });
+  }
+});
+router5.get("/ministry/sessions/:memberId/:sessionId", async (req, res) => {
+  const memberId = req.params["memberId"]?.trim();
+  const sessionId = parseInt(req.params["sessionId"] ?? "", 10);
+  if (!memberId || isNaN(sessionId)) {
+    res.status(400).json({ error: "invalid_params" });
+    return;
+  }
+  try {
+    const session = await getArchivedSession(sessionId, memberId);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    res.json({ session });
+  } catch (err) {
+    req.log.error({ memberId, sessionId, err }, "Ministry sessions: get error");
+    res.status(500).json({ error: "Failed to load session" });
+  }
 });
 var ministry_default = router5;
 
