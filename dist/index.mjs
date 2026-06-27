@@ -283319,7 +283319,13 @@ var OpenAICompatClient = class {
           messages: oaiMessages
         });
         const text2 = response.choices[0]?.message?.content ?? "";
-        return { content: [{ type: "text", text: text2 }] };
+        return {
+          content: [{ type: "text", text: text2 }],
+          usage: {
+            input_tokens: response.usage?.prompt_tokens ?? 0,
+            output_tokens: response.usage?.completion_tokens ?? 0
+          }
+        };
       }
     };
   }
