@@ -308174,8 +308174,8 @@ async function checkPage(check2) {
       clearTimeout(timer);
       responseMs = Date.now() - start;
       httpStatus = res.status;
-      if (res.status !== 200) {
-        failedChecks.push(`HTTP ${res.status} (expected 200)`);
+      if (res.status < 200 || res.status >= 300) {
+        failedChecks.push(`HTTP ${res.status} (not 2xx)`);
       } else {
         body = await res.text();
       }
