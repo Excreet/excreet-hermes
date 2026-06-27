@@ -308325,7 +308325,8 @@ router9.get("/admin/members", async (req, res) => {
     return;
   }
   const wpKey = process.env.EXCREET_WP_MEMBER_KEY;
-  const wpUrl = "https://excreet.com/wp-json/excreet/v1/members/count";
+  const originIp = process.env.EXCREET_WP_ORIGIN_IP;
+  const wpUrl = originIp ? `http://${originIp}/wp-json/excreet/v1/members/count` : "https://excreet.com/wp-json/excreet/v1/members/count";
   if (!wpKey) {
     req.log.warn("EXCREET_WP_MEMBER_KEY not set \u2014 cannot fetch member counts");
     res.status(503).json({ error: "not_configured", message: "WP member key not configured." });
@@ -308333,7 +308334,10 @@ router9.get("/admin/members", async (req, res) => {
   }
   try {
     const r = await fetch(wpUrl, {
-      headers: { Authorization: `Bearer ${wpKey}` },
+      headers: {
+        Authorization: `Bearer ${wpKey}`,
+        ...originIp ? { Host: "excreet.com" } : {}
+      },
       signal: AbortSignal.timeout(8e3)
     });
     if (!r.ok) {
