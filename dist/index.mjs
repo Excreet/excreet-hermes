@@ -310294,6 +310294,31 @@ app.use("/", status_default);
 app.use("/api", routes_default);
 var app_default = app;
 
+// src/lib/startupMigrations.ts
+async function runStartupMigrations() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ministry_chat_archives (
+        id            SERIAL PRIMARY KEY,
+        member_id     TEXT        NOT NULL,
+        messages      JSONB       NOT NULL DEFAULT '[]',
+        message_count INTEGER     NOT NULL DEFAULT 0,
+        preview       TEXT        NOT NULL DEFAULT '',
+        archived_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS ministry_chat_archives_member_archived
+        ON ministry_chat_archives(member_id, archived_at DESC);
+    `);
+    logger.info("Startup migrations: OK");
+  } catch (err) {
+    logger.error({ err }, "Startup migrations: failed");
+  } finally {
+    client.release();
+  }
+}
+
 // src/services/worker.ts
 var POLL_MS = Number(process.env["WORKER_POLL_MS"] ?? 2e3);
 async function tick() {
@@ -310373,6 +310398,7 @@ app_default.listen(port, (err) => {
     process.exit(1);
   }
   logger.info({ port }, "Server listening");
+  void runStartupMigrations();
   startWorker();
   startMonthlyImageScheduler();
   startSiteHealthScheduler();
