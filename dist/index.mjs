@@ -308458,6 +308458,23 @@ router9.post("/admin/site-health/run", async (req, res) => {
     res.status(500).json({ error: "check_failed", detail: String(err) });
   }
 });
+router9.post("/admin/site-health/silence", async (req, res) => {
+  const hours = Math.min(72, Math.max(1, Number(req.body?.hours ?? 8)));
+  const until = Date.now() + hours * 60 * 60 * 1e3;
+  try {
+    await pool.query(
+      `INSERT INTO server_kv (key, value, updated_at)
+       VALUES ('last_health_alert_sent_at', $1, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+      [String(until)]
+    );
+    req.log.info({ hours, until: new Date(until).toISOString() }, "site-health alerts silenced");
+    res.json({ ok: true, silenced_until: new Date(until).toISOString(), hours });
+  } catch (err) {
+    req.log.error({ err }, "admin/site-health/silence error");
+    res.status(500).json({ error: "db_error" });
+  }
+});
 router9.get("/admin/site-health/history", async (req, res) => {
   const page = String(req.query.page ?? "");
   const limit3 = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
