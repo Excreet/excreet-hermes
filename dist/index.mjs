@@ -307925,41 +307925,199 @@ async function sendOwnerEmail(subject, body) {
 }
 
 // src/services/siteHealthService.ts
+import { randomUUID as healthAlertUUID } from "node:crypto";
+async function sendHealthEmail(subject, body, idempotencyKey) {
+  if (!emailConfigured()) return { accepted: false, retryable: true };
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ from: "Excreet Hermes <onboarding@resend.dev>", to: [OWNER_EMAIL], subject, text: body }),
+      signal: AbortSignal.timeout(2e4)
+    });
+    if (!response.ok) {
+      logger.warn({ httpStatus: response.status }, "site-health: provider rejected email");
+      return { accepted: false, retryable: response.status >= 500 || [409, 429].includes(response.status) };
+    }
+    const data = await response.json();
+    return { accepted: typeof data.id === "string" && !!data.id, retryable: !data.id };
+  } catch {
+    logger.warn("site-health: provider request failed; bounded idempotent retry will be considered");
+    return { accepted: false, retryable: true };
+  }
+}
 function healthIssueSignature(results) {
   return JSON.stringify(results.filter((result) => result.status !== "ok").map((result) => ({
     page: result.page,
     url: result.url,
     status: result.status,
-    httpStatus: result.httpStatus,
+    httpStatus: result.failedChecks.some((issue) => issue.startsWith("Monitor blocked:")) ? null : result.httpStatus,
     issues: [...new Set(result.failedChecks.map(
-      (issue) => issue.startsWith("Fetch failed:") ? "Fetch failed" : issue.startsWith("Unexpected error:") ? "Unexpected error" : issue
+      (issue) => issue.startsWith("Monitor blocked:") ? "Monitor blocked" : issue.startsWith("Fetch failed:") ? "Fetch failed" : issue.startsWith("Unexpected error:") ? "Unexpected error" : issue
     ))].sort()
   })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }
-const KV_KEY = "last_health_alert_sent_at";
-const SIGNATURE_KEY = "site_health_last_issue_signature";
-async function claimHealthChange(results) {
-  const previous = await getLatestHealthResults();
-  await pool.query(
-    `INSERT INTO server_kv (key, value, updated_at) VALUES ($1, $2, NOW())
-     ON CONFLICT (key) DO NOTHING`,
-    [SIGNATURE_KEY, healthIssueSignature(previous)]
-  );
-  const silence = await pool.query(
-    "SELECT value FROM server_kv WHERE key = $1",
-    [KV_KEY]
-  );
-  if (Number(silence.rows[0]?.value ?? 0) > Date.now()) return false;
-  const claimed = await pool.query(
-    `UPDATE server_kv SET value = $2, updated_at = NOW()
-     WHERE key = $1 AND value IS DISTINCT FROM $2 RETURNING key`,
-    [SIGNATURE_KEY, healthIssueSignature(results)]
-  );
-  return claimed.rowCount === 1;
+function assessHealthPage(check, httpStatus, body, finalUrl) {
+  const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
+  const blocked = [401, 403, 429].includes(httpStatus) || /just a moment|checking your browser|access denied|403\s*[-–]?\s*forbidden|security check|captcha/i.test(title) || /(?:cf-chl-|challenge-platform|sgcaptcha)/i.test(body);
+  if (blocked) return {
+    status: "error",
+    failedChecks: [`Monitor blocked: HTTP ${httpStatus}; security or rate limiting prevented verification. This is not proof of a website outage.`]
+  };
+  if (httpStatus < 200 || httpStatus >= 300) return {
+    status: "fail",
+    failedChecks: [`Page error: HTTP ${httpStatus}; this page did not return a successful response.`]
+  };
+  if (!body.trim()) return { status: "fail", failedChecks: ["Page error: empty response body."] };
+  const actual = new URL(finalUrl || check.url, check.url);
+  const expected = new URL(check.url);
+  if (actual.hostname !== expected.hostname) return {
+    status: "error",
+    failedChecks: ["Content review: unexpected redirect to a different website."]
+  };
+  const loginPath = /\/(?:wp-login\.php|member-login|membership-options|membership-account)(?:\/|$)/i.test(actual.pathname);
+  const gate = /pmpro_(?:content_message|no_access|level_required)|(?:you must|please)\s+(?:be\s+)?(?:log(?:ged)?\s*in|sign\s*in)|members[- ]only|membership (?:is )?required/i.test(body);
+  if (check.memberOnly && (loginPath || gate)) return {
+    status: "ok",
+    failedChecks: ["Protected page: the expected member sign-in/join gate is present. Paid-member content was not tested."]
+  };
+  if (check.memberOnly) return {
+    status: "error",
+    failedChecks: ["Content review: the expected member access gate was not recognized. Member content and access protection remain unverified."]
+  };
+  if (!check.memberOnly && actual.pathname !== expected.pathname && /\/(?:wp-login\.php|member-login)(?:\/|$)/i.test(actual.pathname)) {
+    return { status: "error", failedChecks: ["Content review: a public page unexpectedly redirected to sign-in."] };
+  }
+  if (check.htmlPage && (!/<html[\s>]/i.test(body) || !/<body[\s>]/i.test(body) || !title.trim())) {
+    return { status: "error", failedChecks: ["Content review: response is not a complete website page."] };
+  }
+  const missing = check.expects.filter((term) => !body.toLowerCase().includes(term.toLowerCase()));
+  if (missing.length) return {
+    status: "error",
+    failedChecks: [`Content review: expected page structure was not found (${missing.join(", ")}). A content change is not proof of an outage.`]
+  };
+  return { status: "ok", failedChecks: [] };
 }
-var INTERNAL_PORT = process.env["PORT"] ?? "8080";
-var INTERNAL_BASE = `http://localhost:${INTERNAL_PORT}`;
-var ENDPOINT_CHECKS = [
+function healthAssessment(result) {
+  if (result.failedChecks.some((issue) => issue.startsWith("Monitor blocked:"))) return "blocked";
+  if (result.failedChecks.some((issue) => issue.startsWith("Protected page:"))) return "protected";
+  if (result.failedChecks.some((issue) => issue.startsWith("Content review:"))) return "review";
+  if (result.failedChecks.some((issue) => issue.startsWith("Fetch failed:") || issue.startsWith("Unexpected error:"))) return "unverified";
+  return result.status === "ok" ? "verified" : "page_error";
+}
+const HEALTH_SIGNATURE_KEY = "site_health_last_issue_signature";
+const HEALTH_OUTBOX_KEY = "site_health_email_outbox";
+const HEALTH_RETRY_MS = [5 * 6e4, 15 * 6e4];
+const HEALTH_MAX_ATTEMPTS = 3;
+async function openHealthClient() {
+  return pool.connect();
+}
+async function queueHealthChange(results, previous, subject, body) {
+  if (process.env["NODE_ENV"] === "development") return false;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('excreet_health_transition'))");
+    await client.query(
+      `INSERT INTO server_kv (key,value,updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO NOTHING`,
+      [HEALTH_SIGNATURE_KEY, healthIssueSignature(previous)]
+    );
+    const silence = await client.query("SELECT value FROM server_kv WHERE key=$1", ["last_health_alert_sent_at"]);
+    if (Number(silence.rows[0]?.value ?? 0) > Date.now()) {
+      await client.query("COMMIT");
+      return false;
+    }
+    const claimed = await client.query(
+      `UPDATE server_kv SET value=$2,updated_at=NOW() WHERE key=$1 AND value IS DISTINCT FROM $2 RETURNING key`,
+      [HEALTH_SIGNATURE_KEY, healthIssueSignature(results)]
+    );
+    if (claimed.rowCount === 1) {
+      const now = Date.now();
+      const job = {
+        id: `excreet-health-${healthAlertUUID()}`,
+        subject,
+        body,
+        attempts: 0,
+        status: "pending",
+        createdAt: now,
+        nextAttemptAt: now,
+        expiresAt: now + 23 * 60 * 6e4
+        // Within Resend's 24-hour idempotency window.
+      };
+      await client.query(
+        `INSERT INTO server_kv(key,value,updated_at) VALUES($1,$2,NOW())
+         ON CONFLICT(key) DO UPDATE SET value=$2,updated_at=NOW()`,
+        [HEALTH_OUTBOX_KEY, JSON.stringify(job)]
+      );
+    }
+    await client.query("COMMIT");
+    return claimed.rowCount === 1;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+async function saveHealthMailJob(client, job) {
+  await client.query(
+    `UPDATE server_kv SET value=$2,updated_at=NOW()
+     WHERE key=$1 AND value::jsonb->>'id'=$3`,
+    [HEALTH_OUTBOX_KEY, JSON.stringify(job), job.id]
+  );
+}
+async function deliverPendingHealthAlert() {
+  if (process.env["NODE_ENV"] === "development" || !emailConfigured()) return;
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const lock = await client.query("SELECT pg_try_advisory_lock(hashtext('excreet_health_delivery')) AS locked");
+    locked = !!lock.rows[0]?.locked;
+    if (!locked) return;
+    const silence = await client.query("SELECT value FROM server_kv WHERE key=$1", ["last_health_alert_sent_at"]);
+    if (Number(silence.rows[0]?.value ?? 0) > Date.now()) return;
+    const saved = await client.query("SELECT value FROM server_kv WHERE key=$1", [HEALTH_OUTBOX_KEY]);
+    if (!saved.rows[0]) return;
+    const job = JSON.parse(saved.rows[0].value);
+    if (["accepted", "exhausted"].includes(job.status) || job.nextAttemptAt > Date.now()) return;
+    if (job.attempts >= HEALTH_MAX_ATTEMPTS || Date.now() >= job.expiresAt) {
+      job.status = "exhausted";
+      await saveHealthMailJob(client, job);
+      return;
+    }
+    job.attempts++;
+    job.status = "sending";
+    job.nextAttemptAt = Date.now() + 2 * 6e4;
+    await saveHealthMailJob(client, job);
+    const outcome = await sendHealthEmail(job.subject, job.body, job.id);
+    job.status = outcome.accepted ? "accepted" : !outcome.retryable || job.attempts >= HEALTH_MAX_ATTEMPTS ? "exhausted" : "retry";
+    job.nextAttemptAt = outcome.accepted ? 0 : Date.now() + (HEALTH_RETRY_MS[job.attempts - 1] ?? 0);
+    await saveHealthMailJob(client, job);
+    logger.info({ status: job.status, attempts: job.attempts }, "site-health: email delivery outcome");
+  } finally {
+    try {
+      if (locked) await client.query("SELECT pg_advisory_unlock(hashtext('excreet_health_delivery'))");
+    } finally {
+      client.release();
+    }
+  }
+}
+async function getHealthAlertDeliveryStatus() {
+  const saved = await pool.query("SELECT value FROM server_kv WHERE key=$1", [HEALTH_OUTBOX_KEY]);
+  if (!saved.rows[0]) return null;
+  const job = JSON.parse(saved.rows[0].value);
+  return {
+    status: job.status,
+    attempts: job.attempts,
+    maxAttempts: HEALTH_MAX_ATTEMPTS,
+    nextAttemptAt: ["retry", "sending"].includes(job.status) ? new Date(job.nextAttemptAt).toISOString() : null,
+    createdAt: new Date(job.createdAt).toISOString(),
+    note: "Accepted means accepted by the email service, not confirmed inbox arrival."
+  };
+}
+const INTERNAL_PORT = process.env["PORT"] ?? "8080";
+const INTERNAL_BASE = `http://localhost:${INTERNAL_PORT}`;
+const ENDPOINT_CHECKS = [
   {
     page: "EMC Endpoint",
     url: `${INTERNAL_BASE}/api/hermes/emc/ping`,
@@ -307977,12 +308135,12 @@ var ENDPOINT_CHECKS = [
   }
 ];
 async function checkEmcAuth() {
-  const url2 = `${INTERNAL_BASE}/api/hermes/emc/analyze`;
+  const url = `${INTERNAL_BASE}/api/hermes/emc/analyze`;
   const start = Date.now();
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1e4);
-    const res = await fetch(url2, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: "sentinel-health-check" }),
@@ -307992,12 +308150,12 @@ async function checkEmcAuth() {
     const responseMs = Date.now() - start;
     const httpStatus = res.status;
     const failedChecks = [];
-    if (httpStatus === 401) {
-      failedChecks.push("EMC analyze returned 401 \u2014 auth is blocking card users");
+    if (httpStatus !== 400) {
+      failedChecks.push(`EMC sentinel returned HTTP ${httpStatus}; expected 400 for an invalid image. Auth/service availability is not verified.`);
     }
     return {
       page: "EMC Auth Check",
-      url: url2,
+      url,
       status: failedChecks.length === 0 ? "ok" : "fail",
       httpStatus,
       responseMs,
@@ -308007,7 +308165,7 @@ async function checkEmcAuth() {
   } catch (err) {
     return {
       page: "EMC Auth Check",
-      url: url2,
+      url,
       status: "error",
       httpStatus: null,
       responseMs: Date.now() - start,
@@ -308017,12 +308175,12 @@ async function checkEmcAuth() {
   }
 }
 async function checkTmcAuth() {
-  const url2 = `${INTERNAL_BASE}/api/hermes/tmc/analyze`;
+  const url = `${INTERNAL_BASE}/api/hermes/tmc/analyze`;
   const start = Date.now();
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1e4);
-    const res = await fetch(url2, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: "sentinel-health-check" }),
@@ -308032,12 +308190,12 @@ async function checkTmcAuth() {
     const responseMs = Date.now() - start;
     const httpStatus = res.status;
     const failedChecks = [];
-    if (httpStatus === 401) {
-      failedChecks.push("TMC analyze returned 401 \u2014 auth is blocking card users");
+    if (httpStatus !== 400) {
+      failedChecks.push(`TMC sentinel returned HTTP ${httpStatus}; expected 400 for an invalid image. Auth/service availability is not verified.`);
     }
     return {
       page: "TMC Auth Check",
-      url: url2,
+      url,
       status: failedChecks.length === 0 ? "ok" : "fail",
       httpStatus,
       responseMs,
@@ -308047,7 +308205,7 @@ async function checkTmcAuth() {
   } catch (err) {
     return {
       page: "TMC Auth Check",
-      url: url2,
+      url,
       status: "error",
       httpStatus: null,
       responseMs: Date.now() - start,
@@ -308057,12 +308215,12 @@ async function checkTmcAuth() {
   }
 }
 async function checkNmcAuth() {
-  const url2 = `${INTERNAL_BASE}/api/hermes/nmc/analyze`;
+  const url = `${INTERNAL_BASE}/api/hermes/nmc/analyze`;
   const start = Date.now();
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1e4);
-    const res = await fetch(url2, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: "sentinel-health-check" }),
@@ -308072,12 +308230,12 @@ async function checkNmcAuth() {
     const responseMs = Date.now() - start;
     const httpStatus = res.status;
     const failedChecks = [];
-    if (httpStatus === 401) {
-      failedChecks.push("NMC analyze returned 401 \u2014 auth is blocking card users");
+    if (httpStatus !== 400) {
+      failedChecks.push(`NMC sentinel returned HTTP ${httpStatus}; expected 400 for an invalid image. Auth/service availability is not verified.`);
     }
     return {
       page: "NMC Auth Check",
-      url: url2,
+      url,
       status: failedChecks.length === 0 ? "ok" : "fail",
       httpStatus,
       responseMs,
@@ -308087,7 +308245,7 @@ async function checkNmcAuth() {
   } catch (err) {
     return {
       page: "NMC Auth Check",
-      url: url2,
+      url,
       status: "error",
       httpStatus: null,
       responseMs: Date.now() - start,
@@ -308096,11 +308254,11 @@ async function checkNmcAuth() {
     };
   }
 }
-var PAGE_CHECKS = [
+const PAGE_CHECKS = [
   {
     page: "Homepage",
     url: "https://excreet.com/",
-    expects: ["excreet", "Become a Member"]
+    expects: ["excreet"]
   },
   {
     page: "Explore",
@@ -308109,13 +308267,13 @@ var PAGE_CHECKS = [
   },
   {
     page: "Membership Levels",
-    url: "https://excreet.com/membership-levels/",
-    expects: ["Starter", "Premium", "15.00", "25.00"]
+    url: "https://excreet.com/membership-options/",
+    expects: ["membership"]
   },
   {
     page: "Membership Checkout",
-    url: "https://excreet.com/membership-checkout/?pmpro_level=1",
-    expects: ["pmpro_checkout", "Starter"]
+    url: "https://excreet.com/membership-checkout/?level=1",
+    expects: ["pmpro_checkout"]
   },
   {
     page: "Member Login",
@@ -308130,40 +308288,48 @@ var PAGE_CHECKS = [
   {
     page: "Welcome Member",
     url: "https://excreet.com/welcome-member/",
-    expects: ["welcome", "member"]
+    expects: ["welcome", "member"],
+    memberOnly: true
   },
   {
     page: "Ministry of Healing",
-    url: "https://excreet.com/?page_id=231",
-    expects: ["excreet"]
+    url: "https://excreet.com/ask-the-healer/",
+    expects: [],
+    memberOnly: true
   },
   {
     page: "Member Dashboard",
-    url: "https://excreet.com/?page_id=772",
-    expects: ["excreet"]
+    url: "https://excreet.com/member-dashboard/",
+    expects: [],
+    memberOnly: true
   },
   {
     page: "Terms of Use",
-    url: "https://excreet.com/?page_id=7",
-    expects: ["excreet"]
+    url: "https://excreet.com/terms-waiver-agreement/",
+    expects: []
   },
   {
     page: "Privacy Policy",
-    url: "https://excreet.com/?page_id=3",
-    expects: ["excreet"]
+    url: "https://excreet.com/privacy-policy/",
+    expects: []
   },
   {
     page: "Affiliate Area",
     url: "https://excreet.com/affiliate-area/",
-    expects: ["affiliate", "referral"]
+    expects: [],
+    memberOnly: true
   },
   {
     page: "Provider Report",
     url: "https://excreet.com/provider-report/",
-    expects: ["provider", "report"]
+    expects: [],
+    memberOnly: true
   }
 ];
-async function checkPage(check2) {
+PAGE_CHECKS.forEach((check) => {
+  check.htmlPage = true;
+});
+async function checkPage(check) {
   const start = Date.now();
   const failedChecks = [];
   let httpStatus = null;
@@ -308173,26 +308339,32 @@ async function checkPage(check2) {
     const timer = setTimeout(() => controller.abort(), 15e3);
     let body = "";
     try {
-      const res = await fetch(check2.url, {
+      const res = await fetch(check.url, {
         signal: controller.signal,
         headers: { "User-Agent": "ExcreetHealthMonitor/1.0" }
       });
-      clearTimeout(timer);
       responseMs = Date.now() - start;
       httpStatus = res.status;
-      if (res.status !== 200) {
-        failedChecks.push(`HTTP ${res.status} (expected 200)`);
-      } else {
-        body = await res.text();
-      }
+      body = await res.text();
+      clearTimeout(timer);
+      const assessed = assessHealthPage(check, res.status, body, res.url || check.url);
+      return {
+        page: check.page,
+        url: check.url,
+        ...assessed,
+        httpStatus,
+        responseMs,
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        assessment: healthAssessment(assessed)
+      };
     } catch (fetchErr) {
       clearTimeout(timer);
       responseMs = Date.now() - start;
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
       failedChecks.push(`Fetch failed: ${msg}`);
       return {
-        page: check2.page,
-        url: check2.url,
+        page: check.page,
+        url: check.url,
         status: "error",
         httpStatus: null,
         responseMs,
@@ -308200,28 +308372,10 @@ async function checkPage(check2) {
         checkedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
     }
-    if (body) {
-      const lower = body.toLowerCase();
-      for (const term of check2.expects) {
-        if (!lower.includes(term.toLowerCase())) {
-          failedChecks.push(`Missing: "${term}"`);
-        }
-      }
-    }
-    const status = failedChecks.length === 0 ? "ok" : "fail";
-    return {
-      page: check2.page,
-      url: check2.url,
-      status,
-      httpStatus,
-      responseMs,
-      failedChecks,
-      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
   } catch (err) {
     return {
-      page: check2.page,
-      url: check2.url,
+      page: check.page,
+      url: check.url,
       status: "error",
       httpStatus,
       responseMs: responseMs ?? Date.now() - start,
@@ -308249,39 +308403,26 @@ async function runSiteHealthChecks() {
       logger.warn({ page: f.page, issues: f.failedChecks }, "site-health: page issue detected");
     }
   }
-  if (await claimHealthChange(results)) {
-    const pageList = failing.map((f) => `\u2022 ${f.page}: ${f.failedChecks.join(", ")}`).join("\n");
-    const subject = failing.length ? `Excreet site health \u2014 updated: ${failing.length} check(s) failing` : "Excreet site health \u2014 all checks recovered";
-    const msg = `EXCREET SITE MONITOR
+  const blocked = failing.filter((result) => healthAssessment(result) === "blocked");
+  const pageErrors = failing.filter((result) => healthAssessment(result) === "page_error");
+  const review = failing.length - blocked.length - pageErrors.length;
+  const protectedCount = results.filter((result) => healthAssessment(result) === "protected").length;
+  const pageList = failing.map((f) => `\u2022 ${f.page}: ${f.failedChecks.join(", ")}`).join("\n");
+  const subject = failing.length ? `Excreet monitor updated \u2014 ${pageErrors.length} page errors, ${blocked.length} blocked checks, ${review} unverified/review` : "Excreet monitor updated \u2014 no outstanding check issues";
+  const msg = `EXCREET SITE MONITOR
 
-${failing.length ? `${failing.length} check(s) currently failing:
+${pageErrors.length} page errors; ${blocked.length} checks blocked by access/security; ${review} checks needing review.
+${protectedCount} protected-page gates observed; paid-member content is not verified by anonymous checks.
 
-${pageList}` : "All monitored checks are now passing."}
+${pageList || "No outstanding check issues."}
 
-This notification is sent only when the issue list changes. Unchanged results do not generate repeat warnings.
+Blocked checks and content changes do not establish that the website is down. This notification is sent only when the issue list changes.
 
-Check: excreet.com
 Time: ${(/* @__PURE__ */ new Date()).toUTCString()}`;
-    if (emailConfigured()) {
-      sendOwnerEmail(subject, msg).catch(
-        (err) => logger.error({ err }, "site-health: email alert failed")
-      );
-    }
-    if (smsConfigured()) {
-      const smsMsg = failing.length ? `EXCREET SITE HEALTH UPDATED
-${failing.length} issue(s):
-${pageList}
-excreet.com` : "EXCREET SITE HEALTH: all monitored checks recovered.\nexcreet.com";
-      sendOwnerAlert(smsMsg).catch(
-        (err) => logger.error({ err }, "site-health: sms alert failed")
-      );
-    }
-    if (!emailConfigured() && !smsConfigured()) {
-      logger.warn("site-health: status changed but no alert channel configured");
-    }
-  } else {
-    logger.info("site-health: no new alert (unchanged issues or explicit silence)");
+  if (await queueHealthChange(results, await getLatestHealthResults(), subject, msg)) {
+    if (smsConfigured()) sendOwnerAlert(msg).catch((err) => logger.error({ err }, "site-health: sms alert failed"));
   }
+  await deliverPendingHealthAlert();
   await db.insert(siteHealthChecksTable).values(
     results.map((r) => ({
       page: r.page,
@@ -308310,11 +308451,15 @@ async function getLatestHealthResults() {
     httpStatus: r.httpStatus,
     responseMs: r.responseMs,
     failedChecks: r.failedChecks ?? [],
-    checkedAt: r.checkedAt.toISOString()
+    checkedAt: r.checkedAt.toISOString(),
+    assessment: healthAssessment({ status: r.status, failedChecks: r.failedChecks ?? [] })
   }));
 }
 function startSiteHealthScheduler() {
   const INTERVAL_MS = 30 * 60 * 1e3;
+  setInterval(() => {
+    deliverPendingHealthAlert().catch((err) => logger.error({ err }, "site-health: retry processing failed"));
+  }, 6e4);
   setTimeout(async () => {
     try {
       await runSiteHealthChecks();
@@ -308443,7 +308588,7 @@ router9.get("/admin/site-health", async (req, res) => {
   try {
     const results = await getLatestHealthResults();
     const failing = results.filter((r) => r.status !== "ok").length;
-    res.json({ results, summary: { total: results.length, failing } });
+    res.json({ results, summary: { total: results.length, failing }, delivery: await getHealthAlertDeliveryStatus() });
   } catch (err) {
     req.log.error({ err }, "admin/site-health error");
     res.status(500).json({ error: "db_error" });
@@ -308454,7 +308599,7 @@ router9.post("/admin/site-health/run", async (req, res) => {
   try {
     const results = await runSiteHealthChecks();
     const failing = results.filter((r) => r.status !== "ok").length;
-    res.json({ ok: true, results, summary: { total: results.length, failing } });
+    res.json({ ok: true, results, summary: { total: results.length, failing }, delivery: await getHealthAlertDeliveryStatus() });
   } catch (err) {
     req.log.error({ err }, "admin/site-health/run error");
     res.status(500).json({ error: "check_failed", detail: String(err) });
