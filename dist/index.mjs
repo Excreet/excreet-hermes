@@ -307925,31 +307925,37 @@ async function sendOwnerEmail(subject, body) {
 }
 
 // src/services/siteHealthService.ts
-var ALERT_COOLDOWN_MS = 8 * 60 * 60 * 1e3;
-var KV_KEY = "last_health_alert_sent_at";
-async function getLastAlertSentAt() {
-  try {
-    const res = await pool.query(
-      "SELECT value FROM server_kv WHERE key = $1",
-      [KV_KEY]
-    );
-    if (res.rows.length === 0) return 0;
-    return parseInt(res.rows[0].value, 10) || 0;
-  } catch {
-    return 0;
-  }
+function healthIssueSignature(results) {
+  return JSON.stringify(results.filter((result) => result.status !== "ok").map((result) => ({
+    page: result.page,
+    url: result.url,
+    status: result.status,
+    httpStatus: result.httpStatus,
+    issues: [...new Set(result.failedChecks.map(
+      (issue) => issue.startsWith("Fetch failed:") ? "Fetch failed" : issue.startsWith("Unexpected error:") ? "Unexpected error" : issue
+    ))].sort()
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
 }
-async function setLastAlertSentAt(ts) {
-  try {
-    await pool.query(
-      `INSERT INTO server_kv (key, value, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-      [KV_KEY, String(ts)]
-    );
-  } catch (err) {
-    logger.error({ err }, "site-health: failed to persist alert timestamp");
-  }
+const KV_KEY = "last_health_alert_sent_at";
+const SIGNATURE_KEY = "site_health_last_issue_signature";
+async function claimHealthChange(results) {
+  const previous = await getLatestHealthResults();
+  await pool.query(
+    `INSERT INTO server_kv (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO NOTHING`,
+    [SIGNATURE_KEY, healthIssueSignature(previous)]
+  );
+  const silence = await pool.query(
+    "SELECT value FROM server_kv WHERE key = $1",
+    [KV_KEY]
+  );
+  if (Number(silence.rows[0]?.value ?? 0) > Date.now()) return false;
+  const claimed = await pool.query(
+    `UPDATE server_kv SET value = $2, updated_at = NOW()
+     WHERE key = $1 AND value IS DISTINCT FROM $2 RETURNING key`,
+    [SIGNATURE_KEY, healthIssueSignature(results)]
+  );
+  return claimed.rowCount === 1;
 }
 var INTERNAL_PORT = process.env["PORT"] ?? "8080";
 var INTERNAL_BASE = `http://localhost:${INTERNAL_PORT}`;
@@ -308174,8 +308180,8 @@ async function checkPage(check2) {
       clearTimeout(timer);
       responseMs = Date.now() - start;
       httpStatus = res.status;
-      if (res.status < 200 || res.status >= 300) {
-        failedChecks.push(`HTTP ${res.status} (not 2xx)`);
+      if (res.status !== 200) {
+        failedChecks.push(`HTTP ${res.status} (expected 200)`);
       } else {
         body = await res.text();
       }
@@ -308242,43 +308248,39 @@ async function runSiteHealthChecks() {
     for (const f of failing) {
       logger.warn({ page: f.page, issues: f.failedChecks }, "site-health: page issue detected");
     }
-    const now = Date.now();
-    const lastAlertSentAt = await getLastAlertSentAt();
-    if (now - lastAlertSentAt > ALERT_COOLDOWN_MS) {
-      await setLastAlertSentAt(now);
-      const pageList = failing.map((f) => `\u2022 ${f.page}: ${f.failedChecks.join(", ")}`).join("\n");
-      const subject = `\u{1F6A8} Excreet Alert \u2014 ${failing.length} issue(s) detected`;
-      const msg = `EXCREET SITE MONITOR
+  }
+  if (await claimHealthChange(results)) {
+    const pageList = failing.map((f) => `\u2022 ${f.page}: ${f.failedChecks.join(", ")}`).join("\n");
+    const subject = failing.length ? `Excreet site health \u2014 updated: ${failing.length} check(s) failing` : "Excreet site health \u2014 all checks recovered";
+    const msg = `EXCREET SITE MONITOR
 
-${failing.length} check(s) failing:
+${failing.length ? `${failing.length} check(s) currently failing:
 
-${pageList}
+${pageList}` : "All monitored checks are now passing."}
+
+This notification is sent only when the issue list changes. Unchanged results do not generate repeat warnings.
 
 Check: excreet.com
 Time: ${(/* @__PURE__ */ new Date()).toUTCString()}`;
-      if (emailConfigured()) {
-        sendOwnerEmail(subject, msg).catch(
-          (err) => logger.error({ err }, "site-health: email alert failed")
-        );
-      }
-      if (smsConfigured()) {
-        const smsMsg = `\u{1F6A8} EXCREET ALERT
-${failing.length} issue(s):
-${pageList}
-excreet.com`;
-        sendOwnerAlert(smsMsg).catch(
-          (err) => logger.error({ err }, "site-health: sms alert failed")
-        );
-      }
-      if (!emailConfigured() && !smsConfigured()) {
-        logger.warn("site-health: issues detected but no alert channel configured (set OWNER_EMAIL + SMTP_USER + SMTP_PASS)");
-      }
-    } else {
-      logger.info(
-        { cooldownRemainingMs: ALERT_COOLDOWN_MS - (now - lastAlertSentAt) },
-        "site-health: issues found but alert suppressed (cooldown active)"
+    if (emailConfigured()) {
+      sendOwnerEmail(subject, msg).catch(
+        (err) => logger.error({ err }, "site-health: email alert failed")
       );
     }
+    if (smsConfigured()) {
+      const smsMsg = failing.length ? `EXCREET SITE HEALTH UPDATED
+${failing.length} issue(s):
+${pageList}
+excreet.com` : "EXCREET SITE HEALTH: all monitored checks recovered.\nexcreet.com";
+      sendOwnerAlert(smsMsg).catch(
+        (err) => logger.error({ err }, "site-health: sms alert failed")
+      );
+    }
+    if (!emailConfigured() && !smsConfigured()) {
+      logger.warn("site-health: status changed but no alert channel configured");
+    }
+  } else {
+    logger.info("site-health: no new alert (unchanged issues or explicit silence)");
   }
   await db.insert(siteHealthChecksTable).values(
     results.map((r) => ({
@@ -308312,7 +308314,7 @@ async function getLatestHealthResults() {
   }));
 }
 function startSiteHealthScheduler() {
-  const INTERVAL_MS = 8 * 60 * 60 * 1e3;
+  const INTERVAL_MS = 30 * 60 * 1e3;
   setTimeout(async () => {
     try {
       await runSiteHealthChecks();
@@ -308327,7 +308329,7 @@ function startSiteHealthScheduler() {
       logger.error({ err }, "site-health: scheduled check failed");
     }
   }, INTERVAL_MS);
-  logger.info("site-health: scheduler started (interval=8h, first-run=15m)");
+  logger.info("site-health: scheduler started (interval=30m, first-run=15m)");
 }
 
 // src/routes/hermes/admin.ts
